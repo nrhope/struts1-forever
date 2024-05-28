@@ -1,0 +1,903 @@
+From 3fb0bf8e4b5d49e4611a2e1203c2ffd7418f8b41 Mon Sep 17 00:00:00 2001
+From: Prashant G Bhagat <pgbhagat@gmail.com>
+Date: Tue, 28 Mar 2017 11:45:22 +0530
+Subject: [PATCH] Fix for CVE-2015-0899
+
+Merging fix from
+https://osdn.net/projects/terasoluna/wiki/StrutsPatch2-EN
+---
+ build-tests.xml                               |   6 +-
+ build.properties.sample                       |   3 +
+ conf/test/log4j.properties                    |  22 ++
+ pom.xml                                       |   5 +
+ .../apache/struts/config/ActionConfig.java    |  37 ++-
+ .../org/apache/struts/util/RequestUtils.java  |   8 +
+ .../struts/validator/DynaValidatorForm.java   |  24 +-
+ .../struts/validator/ValidatorForm.java       |  24 +-
+ .../struts/config/TestActionConfig.java       |  93 +++++++
+ .../struts/util/TestRequestUtilsPopulate.java | 253 ++++++++++++++++++
+ .../validator/TestDynaValidatorForm.java      | 119 ++++++++
+ .../struts/validator/TestValidatorForm.java   | 119 ++++++++
+ 12 files changed, 709 insertions(+), 4 deletions(-)
+ create mode 100644 conf/test/log4j.properties
+ create mode 100644 src/test/org/apache/struts/config/TestActionConfig.java
+ create mode 100644 src/test/org/apache/struts/validator/TestDynaValidatorForm.java
+ create mode 100644 src/test/org/apache/struts/validator/TestValidatorForm.java
+
+diff --git a/build-tests.xml b/build-tests.xml
+index 3a0463f47..de6ac7dee 100644
+--- a/build-tests.xml
++++ b/build-tests.xml
+@@ -159,6 +159,7 @@
+       <pathelement location="${struts.jar}"/>
+       <pathelement location="${antlr.jar}"/>
+       <pathelement location="${xerces.jar}"/>
++	  <pathelement location="${log4j.jar}"/>
+ 
+       <!-- cactus lib jars -->
+       <path refid="cactus.lib.classpath"/>
+@@ -795,11 +796,14 @@
+         <!-- Tests for org.apache.struts.action -->
+         <test       name="org.apache.struts.action.TestDynaActionForm"/>
+         <test       name="org.apache.struts.action.TestDynaActionFormClass"/>
++		<test       name="org.apache.struts.config.TestActionConfig"/>
++		<test       name="org.apache.struts.config.TestActionConfigMatcher"/>
+         <test       name="org.apache.struts.config.TestModuleConfig"/>
+-        <test       name="org.apache.struts.config.TestActionConfigMatcher"/>
+         <test       name="org.apache.struts.tiles.TestTilesPlugin"/>
+ 
+         <!-- Tests for org.apache.struts.validator -->
++		<test       name="org.apache.struts.validator.TestDynaValidatorForm"/>
++        <test       name="org.apache.struts.validator.TestValidatorForm"/>
+         <test       name="org.apache.struts.validator.TestValidWhen"/>
+ 
+         <!-- Tests for org.apache.struts.util -->
+diff --git a/build.properties.sample b/build.properties.sample
+index 6fe5306d9..60014425f 100644
+--- a/build.properties.sample
++++ b/build.properties.sample
+@@ -90,6 +90,9 @@ xerces.jar=${apache.home}/xerces-1_4_4/xerces.jar
+ # http://www.antlr.org/
+ antlr.jar = ../../../antlr-2.7.2/antlr.jar
+ 
++# The JAR file containing the logging package.  This is required if you are
++# going to execute the "test.junit" target.
++log4j.jar=${apache.home}/logging-log4j-1.2.17/dist/lib/log4j-1.2.17.jar
+ 
+ # Properties related to optional tasks
+ # ------------------------------------
+diff --git a/conf/test/log4j.properties b/conf/test/log4j.properties
+new file mode 100644
+index 000000000..01207fb29
+--- /dev/null
++++ b/conf/test/log4j.properties
+@@ -0,0 +1,22 @@
++################################################################################
++##
++## Log4j Configuration file.
++##
++## web.xml of org.springframework.web.util.Log4jConfigListener
++## Define the location of the file with the setting.
++##
++################################################################################
++
++# Log4JLogger Initialization parameter setting
++
++# Log level, appender name setting
++log4j.rootCategory=INFO, consoleLog
++
++# Detailed log level setting
++log4j.category.org.apache.struts.utl=DEBUG
++
++# Console appender setting
++log4j.appender.consoleLog=org.apache.log4j.ConsoleAppender
++log4j.appender.consoleLog.Target=System.out
++log4j.appender.consoleLog.layout=org.apache.log4j.PatternLayout
++log4j.appender.consoleLog.layout.ConversionPattern=[%d{yyyy/MM/dd HH:mm:ss}][%p][%c{1}] %m%n
+\ No newline at end of file
+diff --git a/pom.xml b/pom.xml
+index c2076aa43..6c7ba1ea4 100644
+--- a/pom.xml
++++ b/pom.xml
+@@ -179,6 +179,11 @@
+       <artifactId>antlr</artifactId>
+       <version>2.7.2</version>
+     </dependency>
++	<dependency>
++	  <groupId>log4j</groupId>
++	  <artifactId>log4j</artifactId>
++      <version>1.2.17</version>
++	</dependency>
+     <dependency>
+       <groupId>javax.servlet</groupId>
+       <artifactId>servlet-api</artifactId>
+diff --git a/src/share/org/apache/struts/config/ActionConfig.java b/src/share/org/apache/struts/config/ActionConfig.java
+index e77604d09..99636a783 100644
+--- a/src/share/org/apache/struts/config/ActionConfig.java
++++ b/src/share/org/apache/struts/config/ActionConfig.java
+@@ -557,7 +557,36 @@ public void setCancellable(boolean cancellable) {
+         }
+         this.cancellable = cancellable;
+     }
+-    
++
++	// 2014/07/02 - security problem patch.
++    // Author: NTT DATA Corporation
++    /**
++     * Accepted page value for multi-page validation.<br>
++     * If two or more page values are accepted, then acceptPage is set minimum of them.<br>
++     * If multi-page validation is not use, acceptPage is not set. Then multi-page validation is disabled.
++     * @since Struts 1.2.9-sp2
++     */
++    protected Integer acceptPage = null;
++
++    /**
++     * Returns accepted page value for multi-page validation.
++     *
++     * @return Accepted page value for multi-page validation
++     * @since  Struts 1.2.9-sp2
++     */
++    public Integer getAcceptPage() {
++        return acceptPage;
++    }
++
++    /**
++     * Set accepted page value for multi-page validation.
++     *
++     * @param acceptPage Accepted page value for multi-page validation
++     * @since  Struts 1.2.9-sp2
++     */
++    public void setAcceptPage(Integer acceptPage) {
++        this.acceptPage = acceptPage;
++    }    
+ 
+     // --------------------------------------------------------- Public Methods
+ 
+@@ -811,6 +840,12 @@ public String toString() {
+         sb.append(validate);
+         sb.append(",cancellable=");
+         sb.append(cancellable);
++		
++		// 2014/07/02 - security problem patch.
++        // Author: NTT DATA Corporation
++        sb.append(",acceptPage=");
++        sb.append(acceptPage);
++		
+         return (sb.toString());
+ 
+     }
+diff --git a/src/share/org/apache/struts/util/RequestUtils.java b/src/share/org/apache/struts/util/RequestUtils.java
+index c33902155..0a0605ba2 100644
+--- a/src/share/org/apache/struts/util/RequestUtils.java
++++ b/src/share/org/apache/struts/util/RequestUtils.java
+@@ -480,6 +480,14 @@ public static void populate(
+             } else {
+                 parameterValue = request.getParameterValues(name);
+             }
++			
++			// 2014/05/13 - CVE-2014-0114 security problem patch.
++            // Author: NTT DATA Corporation
++            if (stripped.startsWith("class.") || stripped.indexOf(".class.") >= 0) {
++                // this log output is only for detection of invalid parameters and not an integral part of the bug fix
++                log.info("ignore parameter: paramName=" + stripped);
++                continue;
++            }
+ 
+             // Populate parameters, except "standard" struts attributes
+             // such as 'org.apache.struts.action.CANCEL'
+diff --git a/src/share/org/apache/struts/validator/DynaValidatorForm.java b/src/share/org/apache/struts/validator/DynaValidatorForm.java
+index 1154d8f42..ac8595d80 100644
+--- a/src/share/org/apache/struts/validator/DynaValidatorForm.java
++++ b/src/share/org/apache/struts/validator/DynaValidatorForm.java
+@@ -101,10 +101,14 @@ public ActionErrors validate(ActionMapping mapping, HttpServletRequest request)
+ 
+         String validationKey = getValidationKey(mapping, request);
+ 
++		// 2014/07/02 - security problem patch.
++        // Author: NTT DATA Corporation
++        int validationPage = determinePage(mapping, request);
++		
+         Validator validator = Resources.initValidator(validationKey,
+                              this,
+                              application, request,
+-                             errors, page);
++                             errors, validationPage);
+ 
+         try {
+             validatorResults = validator.validate();
+@@ -115,6 +119,24 @@ public ActionErrors validate(ActionMapping mapping, HttpServletRequest request)
+         return errors;
+     }
+ 
++	// 2014/07/02 - security problem patch.
++    // Author: NTT DATA Corporation
++    /**
++     * Determine validation page.<br>
++     * If acceptPage of ActionMapping is null, then returns Integer.MAX_VALUE.
++     * (multi-page validation is disabled. All validation fields are enabled.)<br>
++     * If page property is less than acceptPage of ActionMapping, returns acceptPage value.<br>
++     * If page property is greater than or equal to acceptPage of ActionMapping, returns page property value.
++     * @param mapping The mapping used to select this instance.
++     * @param request The servlet request we are processing.
++     * @return validation page.
++     * @since Struts 1.2.9-sp2
++     */
++    protected int determinePage(ActionMapping mapping, HttpServletRequest request) {
++        Integer acceptPage = mapping.getAcceptPage();
++        return acceptPage != null ? Math.max(acceptPage.intValue(), page) : Integer.MAX_VALUE;
++    }
++	
+     /**
+      * Returns the Validation key.
+      *
+diff --git a/src/share/org/apache/struts/validator/ValidatorForm.java b/src/share/org/apache/struts/validator/ValidatorForm.java
+index a0c1ca2a6..73750eca3 100644
+--- a/src/share/org/apache/struts/validator/ValidatorForm.java
++++ b/src/share/org/apache/struts/validator/ValidatorForm.java
+@@ -100,11 +100,15 @@ public ActionErrors validate(ActionMapping mapping,
+         ActionErrors errors = new ActionErrors();
+ 
+         String validationKey = getValidationKey(mapping, request);
++		
++		// 2014/07/02 - security problem patch.
++        // Author: NTT DATA Corporation
++        int validationPage = determinePage(mapping, request);
+ 
+         Validator validator = Resources.initValidator(validationKey,
+                              this,
+                              application, request,
+-                             errors, page);
++                             errors, validationPage);
+ 
+         try {
+             validatorResults = validator.validate();
+@@ -114,6 +118,24 @@ public ActionErrors validate(ActionMapping mapping,
+ 
+         return errors;
+     }
++	
++	// 2014/07/02 - security problem patch.
++    // Author: NTT DATA Corporation
++    /**
++     * Determine validation page.<br>
++     * If acceptPage of ActionMapping is null, then returns Integer.MAX_VALUE.
++     * (multi-page validation is disabled. All validation fields are enabled.)<br>
++     * If page property is less than acceptPage of ActionMapping, returns acceptPage value.<br>
++     * If page property is greater than or equal to acceptPage of ActionMapping, returns page property value.
++     * @param mapping The mapping used to select this instance.
++     * @param request The servlet request we are processing.
++     * @return validation page.
++     * @since Struts 1.2.9-sp2
++     */
++    protected int determinePage(ActionMapping mapping, HttpServletRequest request) {
++        Integer acceptPage = mapping.getAcceptPage();
++        return acceptPage != null ? Math.max(acceptPage.intValue(), page) : Integer.MAX_VALUE;
++    }
+ 
+     /**
+      * Returns the Validation key.
+diff --git a/src/test/org/apache/struts/config/TestActionConfig.java b/src/test/org/apache/struts/config/TestActionConfig.java
+new file mode 100644
+index 000000000..fa63e3250
+--- /dev/null
++++ b/src/test/org/apache/struts/config/TestActionConfig.java
+@@ -0,0 +1,93 @@
++/*
++ * Copyright 2004 The Apache Software Foundation.
++ * 
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ * 
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ * 
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package org.apache.struts.config;
++
++import junit.framework.Test;
++import junit.framework.TestSuite;
++
++import org.apache.struts.mock.TestMockBase;
++
++public class TestActionConfig extends TestMockBase {
++
++    /**
++     * Defines the testcase name for JUnit.
++     *
++     * @param theName the testcase's name.
++     */
++    public TestActionConfig(String theName) {
++        super(theName);
++    }
++
++    /**
++     * Start the tests.
++     *
++     * @param theArgs the arguments. Not used
++     */
++    public static void main(String[] theArgs) {
++        junit.awtui.TestRunner.main(
++            new String[] {TestActionConfig.class.getName()});
++    }
++
++    /**
++     * @return a test suite (<code>TestSuite</code>) that includes all methods
++     *         starting with "test"
++     */
++    public static Test suite() {
++        // All methods starting with "test" will be executed in the test suite.
++        return new TestSuite(TestActionConfig.class);
++    }
++
++    public void setUp() {
++        super.setUp();
++    }
++
++    public void tearDown() {
++    	super.tearDown();
++    }
++
++    /**
++     * Test getter of acceptPage property.
++     */
++    public void testGetAcceptPage() {
++        ActionConfig config = new ActionConfig();
++        config.setAcceptPage(new Integer(0));
++        Integer acceptPage = config.getAcceptPage();
++        assertEquals(new Integer(0), acceptPage);
++    }
++
++    /**
++     * Test setter of acceptPage property.
++     */
++    public void testSetAcceptPage() {
++        ActionConfig config = new ActionConfig();
++        config.setAcceptPage(new Integer(0));
++        Integer acceptPage = config.getAcceptPage();
++        assertEquals(new Integer(0), acceptPage);
++    }
++
++    /**
++     * Test a String object representing the value of the ActionConfig object.
++     */
++    public void testToString() {
++        ActionConfig config = new ActionConfig();
++        Integer acceptPage = new Integer(0);
++        config.setAcceptPage(acceptPage);
++        String suffix = "acceptPage=0";
++        assertTrue(config.toString().endsWith(suffix));
++    }
++
++}
+diff --git a/src/test/org/apache/struts/util/TestRequestUtilsPopulate.java b/src/test/org/apache/struts/util/TestRequestUtilsPopulate.java
+index 3ba48e519..3b900e37e 100644
+--- a/src/test/org/apache/struts/util/TestRequestUtilsPopulate.java
++++ b/src/test/org/apache/struts/util/TestRequestUtilsPopulate.java
+@@ -18,11 +18,20 @@
+ 
+ package org.apache.struts.util;
+ 
++import java.io.BufferedReader;
++import java.io.StringReader;
++import java.io.StringWriter;
++import java.util.HashSet;
++
+ import javax.servlet.ServletException;
+ 
+ import junit.framework.Test;
+ import junit.framework.TestSuite;
+ 
++import org.apache.log4j.LogManager;
++import org.apache.log4j.PatternLayout;
++import org.apache.log4j.WriterAppender;
++
+ import org.apache.struts.action.ActionMapping;
+ import org.apache.struts.util.RequestUtils;
+ import org.apache.struts.Globals;
+@@ -116,6 +125,250 @@ public void testMultipartVisibility() throws Exception {
+         assertEquals("Mapping name has been modified", mockMappingName, mapping.getName());
+ 
+     }
++	
++	/** 
++     * Ensure that the parameter of HTTP request
++     * which causes ClassLoader manipulation is ignored.
++     *
++     * The purpose of this test is to ensure that security problem
++     * CVE-2014-0114 is fixed.
++     *
++     */
++    public void testRequestParameterIgnore1() throws Exception {
++
++        String stringValue     = "Test";
++
++        MockFormBean  mockForm = new MockFormBean();
++
++       // Set up the mock HttpServletRequest
++        request.setMethod("GET");
++        request.setContentType("");
++
++        request.addParameter("class.xxx.case1", stringValue);
++
++        // logger
++        StringWriter writer = new StringWriter();
++        WriterAppender appender = new WriterAppender(new PatternLayout("%p, %m%n"), writer);
++        LogManager.getRootLogger().addAppender(appender);
++        LogManager.getRootLogger().setAdditivity(false);
++
++        // Try to populate
++        HashSet ignoreSet = new HashSet();
++        try {
++            RequestUtils.populate(mockForm, request);
++
++            String keyword1 = "INFO, ";
++            String keyword2 = "ignore parameter: paramName=";
++            String logString = writer.toString();
++            StringReader reader = new StringReader(logString);
++            BufferedReader bufReader = new BufferedReader(reader);
++            String line = null;
++            while ((line = bufReader.readLine()) != null) {
++                if (!line.startsWith(keyword1)) {
++                	continue;
++                }
++                int pos = line.indexOf(keyword2);
++                if (pos >= 0) {
++                    ignoreSet.add(line.substring(pos + keyword2.length()));
++                }
++            }
++        } catch(ServletException se) {
++        	fail("Occur exception.");
++        } finally {
++            LogManager.getRootLogger().removeAppender(appender);
++            LogManager.getRootLogger().setAdditivity(true);
++        }
++
++        // Check 
++        assertEquals("ignore num no match", 1, ignoreSet.size());
++        assertTrue("not exists ignore parameter class.xxx.case1", ignoreSet.contains("class.xxx.case1"));
++        assertNull("ActionForm property set", mockForm.getStringProperty());
++
++    }
++
++    /** 
++     * Ensure that the parameter of HTTP request
++     * which causes ClassLoader manipulation is ignored.
++     *
++     * The purpose of this test is to ensure that security problem
++     * CVE-2014-0114 is fixed.
++     *
++     */
++    public void testRequestParameterIgnore2() throws Exception {
++
++        String stringValue     = "Test";
++
++        MockFormBean  mockForm = new MockFormBean();
++
++        // Set up the mock HttpServletRequest
++        request.setMethod("GET");
++        request.setContentType("");
++
++        request.addParameter("xxx.class.case2", stringValue);
++
++        // logger
++        StringWriter writer = new StringWriter();
++        WriterAppender appender = new WriterAppender(new PatternLayout("%p, %m%n"), writer);
++        LogManager.getRootLogger().addAppender(appender);
++        LogManager.getRootLogger().setAdditivity(false);
++
++        // Try to populate
++        HashSet ignoreSet = new HashSet();
++        try {
++            RequestUtils.populate(mockForm, request);
++
++            String keyword1 = "INFO, ";
++            String keyword2 = "ignore parameter: paramName=";
++            String logString = writer.toString();
++            StringReader reader = new StringReader(logString);
++            BufferedReader bufReader = new BufferedReader(reader);
++            String line = null;
++            while ((line = bufReader.readLine()) != null) {
++                if (!line.startsWith(keyword1)) {
++                	continue;
++                }
++                int pos = line.indexOf(keyword2);
++                if (pos >= 0) {
++                    ignoreSet.add(line.substring(pos + keyword2.length()));
++                }
++            }
++        } catch(ServletException se) {
++        	fail("Occur exception.");
++        } finally {
++            LogManager.getRootLogger().removeAppender(appender);
++            LogManager.getRootLogger().setAdditivity(true);
++        }
++
++        // Check 
++        assertEquals("ignore num no match", 1, ignoreSet.size());
++        assertTrue("not exists ignore parameter xxx.class.case2", ignoreSet.contains("xxx.class.case2"));
++        assertNull("ActionForm property set", mockForm.getStringProperty());
++
++    }
++
++    /** 
++     * Ensure that the parameter of HTTP request
++     * which causes ClassLoader manipulation is ignored.
++     *
++     * The purpose of this test is to ensure that security problem
++     * CVE-2014-0114 is fixed.
++     *
++     */
++    public void testRequestParameterIgnore3() throws Exception {
++
++        String stringValue     = "Test";
++
++        MockFormBean  mockForm = new MockFormBean();
++
++        // Set up the mock HttpServletRequest
++        request.setMethod("GET");
++        request.setContentType("");
++
++        request.addParameter("stringProperty", stringValue);
++
++        // logger
++        StringWriter writer = new StringWriter();
++        WriterAppender appender = new WriterAppender(new PatternLayout("%p, %m%n"), writer);
++        LogManager.getRootLogger().addAppender(appender);
++        LogManager.getRootLogger().setAdditivity(false);
++
++        // Try to populate
++        HashSet ignoreSet = new HashSet();
++        try {
++            RequestUtils.populate(mockForm, request);
++
++            String keyword1 = "INFO, ";
++            String keyword2 = "ignore parameter: paramName=";
++            String logString = writer.toString();
++            StringReader reader = new StringReader(logString);
++            BufferedReader bufReader = new BufferedReader(reader);
++            String line = null;
++            while ((line = bufReader.readLine()) != null) {
++                if (!line.startsWith(keyword1)) {
++                	continue;
++                }
++                int pos = line.indexOf(keyword2);
++                if (pos >= 0) {
++                    ignoreSet.add(line.substring(pos + keyword2.length()));
++                }
++            }
++        } catch(ServletException se) {
++        	fail("Occur exception.");
++        } finally {
++            LogManager.getRootLogger().removeAppender(appender);
++            LogManager.getRootLogger().setAdditivity(true);
++        }
++
++        // Check 
++        assertEquals("ignore num no match", 0, ignoreSet.size());
++        assertFalse("exists ignore parameter stringProperty", ignoreSet.contains("stringProperty"));
++        assertEquals("ActionForm property not equal", stringValue, mockForm.getStringProperty());
++
++    }
++
++    /** 
++     * Ensure that the parameter of HTTP request
++     * which causes ClassLoader manipulation is ignored.
++     *
++     * The purpose of this test is to ensure that security problem
++     * CVE-2014-0114 is fixed.
++     *
++     */
++    public void testRequestParameterIgnore4() throws Exception {
++
++        String stringValue     = "Test";
++
++        MockFormBean  mockForm = new MockFormBean();
++
++        // Set up the mock HttpServletRequest
++        request.setMethod("GET");
++        request.setContentType("");
++
++        request.addParameter("class.xxx.case4", stringValue);
++        request.addParameter("xxx.class.case4", stringValue);
++        request.addParameter("stringProperty", stringValue);
++
++        // logger
++        StringWriter writer = new StringWriter();
++        WriterAppender appender = new WriterAppender(new PatternLayout("%p, %m%n"), writer);
++        LogManager.getRootLogger().addAppender(appender);
++        LogManager.getRootLogger().setAdditivity(false);
++
++        // Try to populate
++        HashSet ignoreSet = new HashSet();
++        try {
++            RequestUtils.populate(mockForm, request);
++
++            String keyword1 = "INFO, ";
++            String keyword2 = "ignore parameter: paramName=";
++            String logString = writer.toString();
++            StringReader reader = new StringReader(logString);
++            BufferedReader bufReader = new BufferedReader(reader);
++            String line = null;
++            while ((line = bufReader.readLine()) != null) {
++                if (!line.startsWith(keyword1)) {
++                	continue;
++                }
++                int pos = line.indexOf(keyword2);
++                if (pos >= 0) {
++                    ignoreSet.add(line.substring(pos + keyword2.length()));
++                }
++            }
++        } catch(ServletException se) {
++        	fail("Occur exception.");
++        } finally {
++            LogManager.getRootLogger().removeAppender(appender);
++            LogManager.getRootLogger().setAdditivity(true);
++        }
++
++        // Check 
++        assertEquals("ignore num no match", 2, ignoreSet.size());
++        assertTrue("not exists ignore parameter class.xxx.case4", ignoreSet.contains("class.xxx.case4"));
++        assertTrue("not exists ignore parameter xxx.class.case4", ignoreSet.contains("xxx.class.case4"));
++        assertEquals("ActionForm property not equal", stringValue, mockForm.getStringProperty());
++
++    }
++   
+     
+ }
+ 
+diff --git a/src/test/org/apache/struts/validator/TestDynaValidatorForm.java b/src/test/org/apache/struts/validator/TestDynaValidatorForm.java
+new file mode 100644
+index 000000000..1e32e5bc6
+--- /dev/null
++++ b/src/test/org/apache/struts/validator/TestDynaValidatorForm.java
+@@ -0,0 +1,119 @@
++/*
++ * Copyright 2004 The Apache Software Foundation.
++ * 
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ * 
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ * 
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package org.apache.struts.validator;
++
++import junit.framework.Test;
++import junit.framework.TestSuite;
++
++import org.apache.struts.action.ActionMapping;
++import org.apache.struts.mock.TestMockBase;
++
++public class TestDynaValidatorForm extends TestMockBase {
++
++    /**
++     * Defines the testcase name for JUnit.
++     *
++     * @param theName the testcase's name.
++     */
++    public TestDynaValidatorForm(String theName) {
++        super(theName);
++    }
++
++    /**
++     * Start the tests.
++     *
++     * @param theArgs the arguments. Not used
++     */
++    public static void main(String[] theArgs) {
++        junit.awtui.TestRunner.main(
++            new String[] {TestDynaValidatorForm.class.getName()});
++    }
++
++    /**
++     * @return a test suite (<code>TestSuite</code>) that includes all methods
++     *         starting with "test"
++     */
++    public static Test suite() {
++        return new TestSuite(TestDynaValidatorForm.class);
++    }
++
++    public void setUp() {
++        super.setUp();
++    }
++
++    public void tearDown() {
++    	super.tearDown();
++    }
++
++    /**
++     * Test value of determine page.
++     */
++    public void testDeterminePage01() {
++        DynaValidatorForm validatorForm = new DynaValidatorForm();
++        ActionMapping mapping = new ActionMapping();
++
++        mapping.setAcceptPage(null);
++        validatorForm.setPage(-1);
++        int page = validatorForm.determinePage(mapping, null);
++
++        assertEquals(Integer.MAX_VALUE, page);
++    }
++
++    /**
++     * Test value of determine page.
++     */
++    public void testDeterminePage02() {
++        DynaValidatorForm validatorForm = new DynaValidatorForm();
++        ActionMapping mapping = new ActionMapping();
++
++        mapping.setAcceptPage(new Integer(-1));
++        validatorForm.setPage(-1);
++        int page = validatorForm.determinePage(mapping, null);
++
++        assertEquals(-1, page);
++    }
++
++    /**
++     * Test value of determine page.
++     */
++    public void testDeterminePage03() {
++        DynaValidatorForm validatorForm = new DynaValidatorForm();
++        ActionMapping mapping = new ActionMapping();
++
++        mapping.setAcceptPage(new Integer(-1));
++        validatorForm.setPage(0);
++        int page = validatorForm.determinePage(mapping, null);
++
++        assertEquals(0, page);
++    }
++
++    /**
++     * Test value of determine page.
++     */
++    public void testDeterminePage04() {
++        DynaValidatorForm validatorForm = new DynaValidatorForm();
++        ActionMapping mapping = new ActionMapping();
++
++        mapping.setAcceptPage(new Integer(-1));
++        validatorForm.setPage(1);
++        int page = validatorForm.determinePage(mapping, null);
++
++        assertEquals(1, page);
++    }
++
++}
++
+diff --git a/src/test/org/apache/struts/validator/TestValidatorForm.java b/src/test/org/apache/struts/validator/TestValidatorForm.java
+new file mode 100644
+index 000000000..6da3009ab
+--- /dev/null
++++ b/src/test/org/apache/struts/validator/TestValidatorForm.java
+@@ -0,0 +1,119 @@
++/*
++ * Copyright 2004 The Apache Software Foundation.
++ * 
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ * 
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ * 
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package org.apache.struts.validator;
++
++import junit.framework.Test;
++import junit.framework.TestSuite;
++
++import org.apache.struts.action.ActionMapping;
++import org.apache.struts.mock.TestMockBase;
++
++public class TestValidatorForm extends TestMockBase {
++
++    /**
++     * Defines the testcase name for JUnit.
++     *
++     * @param theName the testcase's name.
++     */
++    public TestValidatorForm(String theName) {
++        super(theName);
++    }
++
++    /**
++     * Start the tests.
++     *
++     * @param theArgs the arguments. Not used
++     */
++    public static void main(String[] theArgs) {
++        junit.awtui.TestRunner.main(
++            new String[] {TestValidatorForm.class.getName()});
++    }
++
++    /**
++     * @return a test suite (<code>TestSuite</code>) that includes all methods
++     *         starting with "test"
++     */
++    public static Test suite() {
++        return new TestSuite(TestValidatorForm.class);
++    }
++
++    public void setUp() {
++        super.setUp();
++    }
++
++    public void tearDown() {
++    	super.tearDown();
++    }
++
++    /**
++     * Test value of determine page.
++     */
++    public void testDeterminePage01() {
++        DynaValidatorForm validatorForm = new DynaValidatorForm();
++        ActionMapping mapping = new ActionMapping();
++
++        mapping.setAcceptPage(null);
++        validatorForm.setPage(-1);
++        int page = validatorForm.determinePage(mapping, null);
++
++        assertEquals(Integer.MAX_VALUE, page);
++    }
++
++    /**
++     * Test value of determine page.
++     */
++    public void testDeterminePage02() {
++        DynaValidatorForm validatorForm = new DynaValidatorForm();
++        ActionMapping mapping = new ActionMapping();
++
++        mapping.setAcceptPage(new Integer(-1));
++        validatorForm.setPage(-1);
++        int page = validatorForm.determinePage(mapping, null);
++
++        assertEquals(-1, page);
++    }
++
++    /**
++     * Test value of determine page.
++     */
++    public void testDeterminePage03() {
++        DynaValidatorForm validatorForm = new DynaValidatorForm();
++        ActionMapping mapping = new ActionMapping();
++
++        mapping.setAcceptPage(new Integer(-1));
++        validatorForm.setPage(0);
++        int page = validatorForm.determinePage(mapping, null);
++
++        assertEquals(0, page);
++    }
++
++    /**
++     * Test value of determine page.
++     */
++    public void testDeterminePage04() {
++        DynaValidatorForm validatorForm = new DynaValidatorForm();
++        ActionMapping mapping = new ActionMapping();
++
++        mapping.setAcceptPage(new Integer(-1));
++        validatorForm.setPage(1);
++        int page = validatorForm.determinePage(mapping, null);
++
++        assertEquals(1, page);
++    }
++
++}
++
